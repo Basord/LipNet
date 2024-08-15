@@ -1,11 +1,25 @@
 import os
 import numpy as np
-from keras import backend as K
+from tensorflow.keras import backend as K
 from scipy import ndimage
-from scipy.misc import imresize
+from skimage.transform import resize as imresize
 import skvideo.io
 import dlib
 from lipnet.lipreading.aligns import Align
+import signal
+import logging
+import time
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+
+class TimeoutException(Exception):
+    pass
+
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("Function call timed out")
 
 class VideoAugmenter(object):
     @staticmethod
@@ -105,18 +119,21 @@ class VideoAugmenter(object):
 
 class Video(object):
     def __init__(self, vtype='mouth', face_predictor_path=None):
+        logger.debug(f"Initializing Video object with vtype={vtype}")
         if vtype == 'face' and face_predictor_path is None:
             raise AttributeError('Face video need to be accompanied with face predictor')
         self.face_predictor_path = face_predictor_path
         self.vtype = vtype
 
     def from_frames(self, path):
+        logger.debug(f"Loading frames from path: {path}")
         frames_path = sorted([os.path.join(path, x) for x in os.listdir(path)])
         frames = [ndimage.imread(frame_path) for frame_path in frames_path]
         self.handle_type(frames)
         return self
 
     def from_video(self, path):
+        logger.debug(f"Loading video from path: {path}")
         frames = self.get_video_frames(path)
         self.handle_type(frames)
         return self
@@ -126,77 +143,109 @@ class Video(object):
         return self
 
     def handle_type(self, frames):
+        logger.debug(f"Handling frames for video type: {self.vtype}")
         if self.vtype == 'mouth':
             self.process_frames_mouth(frames)
         elif self.vtype == 'face':
             self.process_frames_face(frames)
         else:
             raise Exception('Video type not found')
+        logger.debug(f"Frame handling complete")
 
     def process_frames_face(self, frames):
-        detector = dlib.get_frontal_face_detector()
-        predictor = dlib.shape_predictor(self.face_predictor_path)
-        mouth_frames = self.get_frames_mouth(detector, predictor, frames)
-        self.face = np.array(frames)
-        self.mouth = np.array(mouth_frames)
-        self.set_data(mouth_frames)
+        logger.debug(f"Processing {len(frames)} frames for face detection")
+        try:
+            start_time = time.time()
+            timeout = 300  # 5 minutes timeout
+
+            detector = dlib.get_frontal_face_detector()
+            predictor = dlib.shape_predictor(self.face_predictor_path)
+            logger.debug("Face detector and predictor initialized")
+
+            logger.debug("Starting to get mouth frames")
+            mouth_frames = self.get_frames_mouth(detector, predictor, frames, start_time, timeout)
+            logger.debug(f"Obtained {len(mouth_frames)} mouth frames")
+
+            self.face = np.array(frames)
+            self.mouth = np.array(mouth_frames)
+            self.set_data(mouth_frames)
+
+            logger.debug("Face processing completed successfully")
+        except TimeoutException:
+            logger.error("Face detection timed out after 5 minutes")
+        except Exception as e:
+            logger.error(f"Error in face processing: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def process_frames_mouth(self, frames):
         self.face = np.array(frames)
         self.mouth = np.array(frames)
         self.set_data(frames)
 
-    def get_frames_mouth(self, detector, predictor, frames):
+    def get_frames_mouth(self, detector, predictor, frames, start_time, timeout):
+        logger.debug(f"Starting mouth frame extraction for {len(frames)} frames")
         MOUTH_WIDTH = 100
         MOUTH_HEIGHT = 50
         HORIZONTAL_PAD = 0.19
         normalize_ratio = None
         mouth_frames = []
-        for frame in frames:
-            dets = detector(frame, 1)
-            shape = None
-            for k, d in enumerate(dets):
-                shape = predictor(frame, d)
-                i = -1
-            if shape is None: # Detector doesn't detect face, just return as is
-                return frames
-            mouth_points = []
-            for part in shape.parts():
-                i += 1
-                if i < 48: # Only take mouth region
+        for i, frame in enumerate(frames):
+            if time.time() - start_time > timeout:
+                raise TimeoutException("Face detection timed out")
+            
+            logger.debug(f"Processing frame {i+1}/{len(frames)}")
+            try:
+                dets = detector(frame, 1)
+                logger.debug(f"Detected {len(dets)} faces in frame {i+1}")
+                
+                if len(dets) == 0:
+                    logger.warning(f"No face detected in frame {i+1}")
                     continue
-                mouth_points.append((part.x,part.y))
-            np_mouth_points = np.array(mouth_points)
 
-            mouth_centroid = np.mean(np_mouth_points[:, -2:], axis=0)
+                shape = predictor(frame, dets[0])
+                mouth_points = []
+                for j in range(48, 68):  # Only take mouth region
+                    mouth_points.append((shape.part(j).x, shape.part(j).y))
+                np_mouth_points = np.array(mouth_points)
 
-            if normalize_ratio is None:
-                mouth_left = np.min(np_mouth_points[:, :-1]) * (1.0 - HORIZONTAL_PAD)
-                mouth_right = np.max(np_mouth_points[:, :-1]) * (1.0 + HORIZONTAL_PAD)
+                mouth_centroid = np.mean(np_mouth_points[:, -2:], axis=0)
 
-                normalize_ratio = MOUTH_WIDTH / float(mouth_right - mouth_left)
+                if normalize_ratio is None:
+                    mouth_left = np.min(np_mouth_points[:, :-1]) * (1.0 - HORIZONTAL_PAD)
+                    mouth_right = np.max(np_mouth_points[:, :-1]) * (1.0 + HORIZONTAL_PAD)
+                    normalize_ratio = MOUTH_WIDTH / float(mouth_right - mouth_left)
 
-            new_img_shape = (int(frame.shape[0] * normalize_ratio), int(frame.shape[1] * normalize_ratio))
-            resized_img = imresize(frame, new_img_shape)
+                new_img_shape = (int(frame.shape[0] * normalize_ratio), int(frame.shape[1] * normalize_ratio))
+                resized_img = imresize(frame, new_img_shape)
 
-            mouth_centroid_norm = mouth_centroid * normalize_ratio
+                mouth_centroid_norm = mouth_centroid * normalize_ratio
 
-            mouth_l = int(mouth_centroid_norm[0] - MOUTH_WIDTH / 2)
-            mouth_r = int(mouth_centroid_norm[0] + MOUTH_WIDTH / 2)
-            mouth_t = int(mouth_centroid_norm[1] - MOUTH_HEIGHT / 2)
-            mouth_b = int(mouth_centroid_norm[1] + MOUTH_HEIGHT / 2)
+                mouth_l = int(mouth_centroid_norm[0] - MOUTH_WIDTH / 2)
+                mouth_r = int(mouth_centroid_norm[0] + MOUTH_WIDTH / 2)
+                mouth_t = int(mouth_centroid_norm[1] - MOUTH_HEIGHT / 2)
+                mouth_b = int(mouth_centroid_norm[1] + MOUTH_HEIGHT / 2)
 
-            mouth_crop_image = resized_img[mouth_t:mouth_b, mouth_l:mouth_r]
+                mouth_crop_image = resized_img[mouth_t:mouth_b, mouth_l:mouth_r]
+                mouth_frames.append(mouth_crop_image)
+                logger.debug(f"Successfully processed frame {i+1}")
+            except Exception as e:
+                logger.error(f"Error processing frame {i+1}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
 
-            mouth_frames.append(mouth_crop_image)
+        logger.debug(f"Extracted {len(mouth_frames)} mouth frames")
         return mouth_frames
 
     def get_video_frames(self, path):
+        logger.debug(f"Extracting frames from video: {path}")
         videogen = skvideo.io.vreader(path)
         frames = np.array([frame for frame in videogen])
+        logger.debug(f"Extracted {len(frames)} frames")
         return frames
 
     def set_data(self, frames):
+        logger.debug("Setting data for frames")
         data_frames = []
         for frame in frames:
             frame = frame.swapaxes(0,1) # swap width and height to form format W x H x C
@@ -209,3 +258,4 @@ class Video(object):
             data_frames = np.rollaxis(data_frames, 3) # C x T x W x H
         self.data = data_frames
         self.length = frames_n
+        logger.debug(f"Data set with shape {self.data.shape} and length {self.length}")

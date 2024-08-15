@@ -1,4 +1,4 @@
-from keras import backend as K
+import tensorflow as tf
 import numpy as np
 
 def _decode(y_pred, input_length, greedy=True, beam_width=100, top_paths=1):
@@ -26,16 +26,27 @@ def _decode(y_pred, input_length, greedy=True, beam_width=100, top_paths=1):
             Tensor `(top_paths, )` that contains
                 the log probability of each decoded sequence.
     """
-    decoded = K.ctc_decode(y_pred=y_pred, input_length=input_length,
-                           greedy=greedy, beam_width=beam_width, top_paths=top_paths)
-    paths = [path.eval(session=K.get_session()) for path in decoded[0]]
-    logprobs  = decoded[1].eval(session=K.get_session())
+    input_shape = tf.shape(y_pred)
+    num_samples, num_steps = input_shape[0], input_shape[1]
+    y_pred = tf.math.log(tf.transpose(y_pred, perm=[1, 0, 2]) + 1e-8)
+    input_length = tf.cast(input_length, tf.int32)
 
-    return (paths, logprobs)
+    if greedy:
+        (decoded, log_prob) = tf.nn.ctc_greedy_decoder(
+            inputs=y_pred,
+            sequence_length=input_length)
+    else:
+        (decoded, log_prob) = tf.nn.ctc_beam_search_decoder(
+            inputs=y_pred,
+            sequence_length=input_length,
+            beam_width=beam_width,
+            top_paths=top_paths)
+    
+    decoded_dense = [tf.sparse.to_dense(st).numpy() for st in decoded]
+    return (decoded_dense, log_prob.numpy())
 
 def decode(y_pred, input_length, greedy=True, beam_width=100, top_paths=1, **kwargs):
     language_model = kwargs.get('language_model', None)
-
     paths, logprobs = _decode(y_pred=y_pred, input_length=input_length,
                               greedy=greedy, beam_width=beam_width, top_paths=top_paths)
     if language_model is not None:
@@ -64,5 +75,4 @@ class Decoder(object):
             for postprocessor in self.postprocessors:
                 out = postprocessor(out)
             preprocessed.append(out)
-
         return preprocessed
