@@ -1,3 +1,5 @@
+import tensorflow as tf
+import numpy as np
 from tensorflow.keras.layers import Conv3D, ZeroPadding3D
 from tensorflow.keras.layers import MaxPooling3D
 from tensorflow.keras.layers import Dense, Activation, SpatialDropout3D, Flatten
@@ -5,11 +7,11 @@ from tensorflow.keras.layers import Bidirectional, TimeDistributed
 from tensorflow.keras.layers import GRU
 from tensorflow.keras.layers import BatchNormalization
 from tensorflow.keras.layers import Input
+from tensorflow.keras.layers import Input, Conv3D, BatchNormalization, Activation, MaxPooling3D, Dense, GRU, Bidirectional, TimeDistributed, Flatten, ZeroPadding3D, SpatialDropout3D
 from tensorflow.keras.models import Model
 from lipnet.core.layers import CTC
 from tensorflow.keras import backend as K
-import tensorflow as tf
-import numpy as np
+
 
 
 class LipNet(object):
@@ -23,9 +25,8 @@ class LipNet(object):
         self.build()
 
     def build(self):
-        input_shape = (self.frames_n, self.img_h, self.img_w, self.img_c)
+        input_shape = (self.frames_n, self.img_w, self.img_h, self.img_c)
         self.input_data = Input(name='the_input', shape=input_shape)
-        
 
         self.zero1 = ZeroPadding3D(padding=(1, 2, 2), name='zero1')(self.input_data)
         self.conv1 = Conv3D(32, (3, 5, 5), strides=(1, 2, 2), kernel_initializer='he_normal', name='conv1')(self.zero1)
@@ -50,31 +51,34 @@ class LipNet(object):
 
         self.resh1 = TimeDistributed(Flatten())(self.maxp3)
 
-        self.gru_1 = Bidirectional(GRU(256, return_sequences=True, kernel_initializer='Orthogonal', name='gru1', reset_after=False), merge_mode='concat')(self.resh1)
-        self.gru_2 = Bidirectional(GRU(256, return_sequences=True, kernel_initializer='Orthogonal', name='gru2', reset_after=False), merge_mode='concat')(self.gru_1)
+        self.gru_1 = Bidirectional(GRU(256, return_sequences=True, kernel_initializer='Orthogonal', name='gru1', reset_after=True), merge_mode='concat', name='bidirectional_1')(self.resh1)
+        self.gru_2 = Bidirectional(GRU(256, return_sequences=True, kernel_initializer='Orthogonal', name='gru2', reset_after=True), merge_mode='concat', name='bidirectional_2')(self.gru_1)
 
         self.dense1 = Dense(self.output_size, kernel_initializer='he_normal', name='dense1')(self.gru_2)
 
         self.y_pred = Activation('softmax', name='softmax')(self.dense1)
 
-        self.model = Model(inputs=self.input_data, outputs=self.y_pred)
-        self.model.summary()
+        self.labels = Input(name='the_labels', shape=[self.absolute_max_string_len], dtype='float32')
+        self.input_length = Input(name='input_length', shape=[1], dtype='int64')
+        self.label_length = Input(name='label_length', shape=[1], dtype='int64')
 
-    def load_weights(self, path):
-        self.model.load_weights(path, by_name=True, skip_mismatch=True)
-        print("Weights loaded with skip_mismatch=True")
+        self.loss_out = CTC('ctc', [self.y_pred, self.labels, self.input_length, self.label_length])
+
+        self.model = Model(inputs=[self.input_data, self.labels, self.input_length, self.label_length], outputs=self.loss_out)
+        
+        print("LipNet Model Summary:")
+        self.model.summary()
 
     def summary(self):
-        self.model.summary()
-    
+        Model(inputs=self.input_data, outputs=self.y_pred).summary()
+
+    def load_weights(self, path):
+        self.model.load_weights(path)
+        print("Weights loaded")
 
     def predict(self, input_batch):
-        return self.model.predict(input_batch)
+        return self.test_function([input_batch, 0])[0]  # the first 0 indicates test
 
     @property
-
     def test_function(self):
-        @tf.function
-        def predict_fn(x):
-            return self.model(x, training=False)
-        return predict_fn
+        return K.function([self.input_data, K.learning_phase()], [self.y_pred, K.learning_phase()])
