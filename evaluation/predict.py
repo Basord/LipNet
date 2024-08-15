@@ -10,9 +10,6 @@ import numpy as np
 import sys
 import os
 import tensorflow as tf
-from ctc_layer import CTC  # Import the CTC class we just created
-import h5py
-
 print(tf.__version__)
 
 np.random.seed(55)
@@ -24,6 +21,8 @@ FACE_PREDICTOR_PATH = os.path.join(CURRENT_PATH,'..','common','predictors','shap
 PREDICT_GREEDY      = False
 PREDICT_BEAM_WIDTH  = 200
 PREDICT_DICTIONARY  = os.path.join(CURRENT_PATH,'..','common','dictionaries','grid.txt')
+
+# ... (keep all the imports as they were)
 
 def predict(weight_path, video_path, absolute_max_string_len=32, output_size=28):
     print("\nLoading data from disk...")
@@ -47,6 +46,8 @@ def predict(weight_path, video_path, absolute_max_string_len=32, output_size=28)
         traceback.print_exc()
         return None, None
 
+    # ... rest of the function remains the same
+
     print("Preparing data for prediction...")
     try:
         if K.image_data_format() == 'channels_first':
@@ -64,24 +65,10 @@ def predict(weight_path, video_path, absolute_max_string_len=32, output_size=28)
                         absolute_max_string_len=absolute_max_string_len, output_size=output_size)
         adam = Adam(learning_rate=0.0001, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
         lipnet.model.compile(loss={'ctc': lambda y_true, y_pred: y_pred}, optimizer=adam)
-        def print_structure(name, obj):
-            print(name)
-            if isinstance(obj, h5py.Dataset):
-                print(f"  Shape: {obj.shape}")
-                print(f"  dtype: {obj.dtype}")
-
-        print("Inspecting weight file structure:")
-        with h5py.File(weight_path, 'r') as f:
-            f.visititems(print_structure)
-
-        # Then load weights
-        print("Loading weights...")                
-        lipnet.model.load_weights(weight_path, by_name=True, skip_mismatch=True)
+        lipnet.load_weights(weight_path)
         print("Model initialized and weights loaded.")
     except Exception as e:
         print(f"Error initializing model: {e}")
-        import traceback
-        traceback.print_exc()
         return None, None
 
     print("Setting up decoder and spell checker...")
@@ -89,6 +76,7 @@ def predict(weight_path, video_path, absolute_max_string_len=32, output_size=28)
     decoder = Decoder(greedy=PREDICT_GREEDY, beam_width=PREDICT_BEAM_WIDTH,
                       postprocessors=[labels_to_text, spell.sentence])
 
+    
     print("Preparing input data for prediction...")
     X_data = np.array([video.data]).astype(np.float32) / 255
     input_length = np.array([len(video.data)])
@@ -97,7 +85,7 @@ def predict(weight_path, video_path, absolute_max_string_len=32, output_size=28)
     X_data = np.transpose(X_data, (0, 1, 3, 2, 4))
     
     print(f"Input shape: {X_data.shape}")
-    print(f"Expected input shape: {lipnet.model.input_shape[0]}")  # Changed this line
+    print(f"Expected input shape: {lipnet.model.input_shape}")
 
     print("Running prediction...")
     try:
@@ -107,11 +95,7 @@ def predict(weight_path, video_path, absolute_max_string_len=32, output_size=28)
         
         print(f"X_data shape before prediction: {X_data.shape}")
         
-        # Changed this part to use the new model structure
-        dummy_labels = np.zeros((1, absolute_max_string_len))
-        dummy_label_length = np.zeros((1, 1))
-        y_pred = lipnet.model.predict([X_data, dummy_labels, input_length, dummy_label_length])
-        
+        y_pred = lipnet.predict(X_data)
         print(f"Prediction shape: {y_pred.shape}")
         
         result = decoder.decode(y_pred, input_length)[0]
@@ -141,7 +125,6 @@ if __name__ == '__main__':
 
         stripe = "-" * len(result)
         print("")
-        
         print("             --{}- ".format(stripe))
         print("[ DECODED ] |> {} |".format(result))
         print("             --{}- ".format(stripe))
@@ -149,3 +132,4 @@ if __name__ == '__main__':
         print("Prediction failed. Please check the error messages above.")
 
     print("Script execution completed.")
+    
